@@ -149,6 +149,7 @@ body {
   font: 500 15px var(--body); padding: 12px; cursor: pointer;
 }
 .btn:focus-visible, .link:focus-visible, .undo:focus-visible, .photo:focus-visible { outline: 3px solid var(--brass); outline-offset: 3px; }
+.ver { justify-self: center; font-size: 11px; color: var(--muted); opacity: .6; }
 .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); opacity: 0; }
 
 .viewer {
@@ -191,6 +192,7 @@ body {
       I locked it
     </button>
     <button class="link" id="noPhoto" type="button">Log without photo</button>
+    <span class="ver">v4</span>
     <input class="vh" type="file" id="cam" accept="image/*" capture="environment" tabindex="-1" aria-hidden="true">
   </footer>
 </div>
@@ -307,8 +309,14 @@ body {
   let ac = null;
   function unlockAudio() {   // must run inside a tap so iOS lets the page make sound
     try {
-      ac = ac || new (window.AudioContext || window.webkitAudioContext)();
-      if (ac.state === "suspended") ac.resume();
+      // "playback" lets the clack through when the iPhone's silent switch is on.
+      if (navigator.audioSession) navigator.audioSession.type = "playback";
+      if (!ac) {
+        ac = new (window.AudioContext || window.webkitAudioContext)();
+        const s = ac.createBufferSource();   // a silent blip unlocks output on iOS
+        s.buffer = ac.createBuffer(1, 1, 22050); s.connect(ac.destination); s.start(0);
+      }
+      if (ac.state !== "running") ac.resume();
     } catch {}
   }
   function click(at, freq, gain, len) {
@@ -328,13 +336,17 @@ body {
   function lockSound() {
     unlockAudio();
     if (!ac) return;
-    try {
-      const t = ac.currentTime;
-      click(t + .04, 4200, .18, .025);   // key starts turning
-      click(t + .26, 3600, .14, .02);
-      click(t + .49, 2400, .7, .045);    // bolt lands
-      thump(t + .49);
-    } catch {}
+    const play = () => {
+      try {
+        const t = ac.currentTime;
+        click(t + .04, 4200, .18, .025);   // key starts turning
+        click(t + .26, 3600, .14, .02);
+        click(t + .49, 2400, .7, .045);    // bolt lands
+        thump(t + .49);
+      } catch {}
+    };
+    // After the camera closes iOS can leave audio paused; wait for it to resume.
+    if (ac.state === "running") play(); else ac.resume().then(play, () => {});
   }
   function celebrate() {
     const hero = $("hero");
@@ -405,7 +417,12 @@ body {
   render();
   load().then(list => { entries = trim(list.slice().sort((a, b) => b.at - a.at)); render(); }).catch(() => {});
   setInterval(render, 30000);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) render(); });
+  // A Home Screen app resumes without reloading, so check for a newer version whenever it comes back.
+  const VERSION = 4;
+  const checkUpdate = () => fetch("version.json?t=" + Date.now(), { cache: "no-store" })
+    .then(r => r.json()).then(j => { if (j.v > VERSION) location.reload(); }).catch(() => {});
+  checkUpdate();
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { render(); checkUpdate(); } });
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 })();
