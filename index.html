@@ -103,7 +103,6 @@ body {
 
 .answer { margin: 8px 0 0; font: 700 40px/1.05 var(--display); letter-spacing: -.01em; text-wrap: balance; }
 .hero[data-state="fresh"] .answer { color: var(--ok); }
-.hero[data-state="stale"] .answer { color: var(--stale); }
 .when { margin: 0; color: var(--muted); font-size: 17px; font-variant-numeric: tabular-nums; text-wrap: balance; max-width: 30ch; }
 .when b { color: var(--ink); font-weight: 600; }
 
@@ -178,6 +177,7 @@ body {
     <p class="when" id="when">Tap below when you lock up. A photo of the key is the best proof.</p>
     <p class="word" id="word" hidden><span id="wordLabel">Say it out loud:</span><b id="wordText"></b></p>
     <button class="photo" id="photoBtn" type="button" aria-label="Show photo full screen" hidden><img id="photo" alt="Your photo of the locked door"></button>
+    <button class="undo" id="seePhoto" type="button" hidden>See that photo</button>
     <button class="undo" id="undo" type="button" hidden>Remove</button>
   </main>
 
@@ -192,14 +192,15 @@ body {
       I locked it
     </button>
     <button class="link" id="noPhoto" type="button">Log without photo</button>
-    <span class="ver">v4</span>
+    <span class="ver">v5</span>
     <input class="vh" type="file" id="cam" accept="image/*" capture="environment" tabindex="-1" aria-hidden="true">
   </footer>
 </div>
 
 <script>
 (() => {
-  const MAX_ENTRIES = 30, MAX_PHOTOS = 5, FRESH_HOURS = 16;
+  // Green "Locked" lasts FRESH_HOURS, then resets so an old lock never vouches for a later trip out.
+  const MAX_ENTRIES = 30, MAX_PHOTOS = 5, FRESH_HOURS = 3;
   const $ = id => document.getElementById(id);
   let entries = [];        // newest first: {at: ms, photo?: dataURL}
   let armed = false;       // "Remove" waiting for a second tap
@@ -258,24 +259,24 @@ body {
       hero.dataset.state = "none";
       $("answer").textContent = "Did I lock it?";
       when.textContent = "Tap below when you lock up. A photo of the key is the best proof.";
-      $("photoBtn").hidden = true; $("undo").hidden = true; $("word").hidden = true;
+      $("photoBtn").hidden = true; $("undo").hidden = true; $("word").hidden = true; $("seePhoto").hidden = true;
     } else {
       const fresh = Date.now() - last.at < FRESH_HOURS * 36e5;
-      hero.dataset.state = fresh ? "fresh" : "stale";
-      $("answer").textContent = fresh ? "Locked" : "Not logged recently";
+      hero.dataset.state = fresh ? "fresh" : "reset";
+      $("answer").textContent = fresh ? "Locked" : "Did I lock it?";
       const day = dayWord(last.at);
       const t = document.createElement("b"); t.textContent = hm(last.at);
-      when.append(day === "Today" ? "" : day + " ", t, " · " + ago(last.at));
+      if (fresh) when.append(day === "Today" ? "" : day + " ", t, " · " + ago(last.at));
+      else when.append("Last time: " + day.toLowerCase() + " ", t, " · " + ago(last.at));
+      $("seePhoto").hidden = fresh || !last.photo;
+      $("undo").hidden = !fresh;
       $("word").hidden = !(fresh && last.word);
       if (last.word) {
         $("wordLabel").textContent = Date.now() - last.at < 60000 ? "Say it out loud:" : "Your word:";
         $("wordText").textContent = last.word;
       }
-      if (last.photo) {
-        if ($("photo").src !== last.photo) $("photo").src = last.photo;
-        $("photoBtn").hidden = false;
-      } else $("photoBtn").hidden = true;
-      $("undo").hidden = false;
+      if (last.photo && $("photo").src !== last.photo) $("photo").src = last.photo;
+      $("photoBtn").hidden = !(fresh && last.photo);
       $("undo").textContent = armed ? "Tap again to remove" : "Remove";
       $("undo").classList.toggle("armed", armed);
     }
@@ -407,6 +408,7 @@ body {
     catch { await logLock(null); }
     finally { b.disabled = false; }
   };
+  $("seePhoto").onclick = () => $("photoBtn").onclick();
   $("photoBtn").onclick = () => {
     const v = document.createElement("div"); v.className = "viewer";
     const i = document.createElement("img"); i.src = $("photo").src; i.alt = $("photo").alt;
@@ -418,7 +420,7 @@ body {
   load().then(list => { entries = trim(list.slice().sort((a, b) => b.at - a.at)); render(); }).catch(() => {});
   setInterval(render, 30000);
   // A Home Screen app resumes without reloading, so check for a newer version whenever it comes back.
-  const VERSION = 4;
+  const VERSION = 5;
   const checkUpdate = () => fetch("version.json?t=" + Date.now(), { cache: "no-store" })
     .then(r => r.json()).then(j => { if (j.v > VERSION) location.reload(); }).catch(() => {});
   checkUpdate();

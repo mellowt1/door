@@ -1,5 +1,5 @@
 // Offline shell: network first for the page (so updates arrive), cache as fallback.
-const CACHE = "door-v4";
+const CACHE = "door-v5";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "version.json", "icon.svg", "icon-180.png", "icon-192.png", "icon-512.png"];
 
 self.addEventListener("install", e => {
