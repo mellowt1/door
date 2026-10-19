@@ -1,5 +1,5 @@
 // Offline shell: network first for the page (so updates arrive), cache as fallback.
-const CACHE = "door-v5";
+const CACHE = "door-v6";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "version.json", "icon.svg", "icon-180.png", "icon-192.png", "icon-512.png"];
 
 self.addEventListener("install", e => {
@@ -16,6 +16,8 @@ self.addEventListener("activate", e => {
 
 self.addEventListener("fetch", e => {
   if (e.request.method !== "GET") return;
+  // paul-hub and the fonts go straight to the network: an API call made offline must fail, not get the page.
+  if (new URL(e.request.url).origin !== location.origin) return;
   // Own files skip the browser's HTTP cache (GitHub Pages allows 10 min), so updates show up at once.
   const own = new URL(e.request.url).origin === location.origin;
   e.respondWith(

@@ -116,6 +116,8 @@ body {
   font: 500 14px var(--body); padding: 8px; cursor: pointer;
 }
 .undo.armed { color: var(--danger); }
+.remind { margin: 6px 0 0; color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; text-wrap: balance; max-width: 32ch; }
+.connect { align-self: center; margin: -12px 0 12px; font-size: 13px; }
 
 /* ---------- history ---------- */
 .history { padding-bottom: 24px; }
@@ -147,7 +149,7 @@ body {
   appearance: none; border: 0; background: none; color: var(--muted);
   font: 500 15px var(--body); padding: 12px; cursor: pointer;
 }
-.btn:focus-visible, .link:focus-visible, .undo:focus-visible, .photo:focus-visible { outline: 3px solid var(--brass); outline-offset: 3px; }
+.btn:focus-visible, .link:focus-visible, .undo:focus-visible, .connect:focus-visible, .photo:focus-visible { outline: 3px solid var(--brass); outline-offset: 3px; }
 .ver { justify-self: center; font-size: 11px; color: var(--muted); opacity: .6; }
 .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); opacity: 0; }
 
@@ -179,12 +181,14 @@ body {
     <button class="photo" id="photoBtn" type="button" aria-label="Show photo full screen" hidden><img id="photo" alt="Your photo of the locked door"></button>
     <button class="undo" id="seePhoto" type="button" hidden>See that photo</button>
     <button class="undo" id="undo" type="button" hidden>Remove</button>
+    <p class="remind" id="remind" hidden></p>
   </main>
 
   <section class="history" id="history" hidden>
     <h2>Earlier</h2>
     <ol id="list"></ol>
   </section>
+  <button class="undo connect" id="connect" type="button" hidden>Connect to paul-hub</button>
 
   <footer class="bar">
     <button class="btn" id="withPhoto" type="button">
@@ -192,7 +196,7 @@ body {
       I locked it
     </button>
     <button class="link" id="noPhoto" type="button">Log without photo</button>
-    <span class="ver">v5</span>
+    <span class="ver">v6</span>
     <input class="vh" type="file" id="cam" accept="image/*" capture="environment" tabindex="-1" aria-hidden="true">
   </footer>
 </div>
@@ -202,8 +206,10 @@ body {
   // Green "Locked" lasts FRESH_HOURS, then resets so an old lock never vouches for a later trip out.
   const MAX_ENTRIES = 30, MAX_PHOTOS = 5, FRESH_HOURS = 3;
   const $ = id => document.getElementById(id);
-  let entries = [];        // newest first: {at: ms, photo?: dataURL}
+  let entries = [];        // newest first: {id, at: ms, word, photo?: dataURL}
   let armed = false;       // "Remove" waiting for a second tap
+  let code = "", codeBad = false, flushing = false;   // paul-hub (see below)
+  let next = null;         // the hub's next reminder: {title, start, remindAt}
 
   // ---------- storage: IndexedDB, one record holding the whole log ----------
   const idb = new Promise((resolve, reject) => {
@@ -251,6 +257,15 @@ body {
     return d === 1 ? "1 day ago" : d + " days ago";
   };
 
+  // "Reminder 18:15 for Archery"; once the reminder time has come, just the appointment.
+  function remindLine() {
+    if (!next || !(Date.parse(next.start) > Date.now())) return "";
+    const r = Date.parse(next.remindAt), start = Date.parse(next.start);
+    if (!(r > Date.now())) return next.title + " at " + hm(start);
+    const day = dayWord(r);
+    return "Reminder " + (day === "Today" ? "" : (day === dayWord(Date.now() + 864e5) ? "tomorrow" : day) + " ") + hm(r) + " for " + next.title;
+  }
+
   // ---------- render ----------
   function render() {
     const hero = $("hero"), last = entries[0], when = $("when");
@@ -281,6 +296,12 @@ body {
       $("undo").classList.toggle("armed", armed);
     }
 
+    const line = remindLine();
+    $("remind").textContent = line;
+    $("remind").hidden = !line;
+    $("connect").hidden = !!code && !codeBad;
+    $("connect").textContent = codeBad ? "paul-hub did not know that code. Connect again" : "Connect to paul-hub";
+
     const older = entries.slice(1, 6), list = $("list");
     list.textContent = "";
     $("history").hidden = older.length === 0;
@@ -292,7 +313,7 @@ body {
     }
   }
 
-  const trim = list => list.slice(0, MAX_ENTRIES).map((e, i) => (i < MAX_PHOTOS || !e.photo) ? e : { at: e.at, word: e.word });
+  const trim = list => list.slice(0, MAX_ENTRIES).map((e, i) => (i < MAX_PHOTOS || !e.photo) ? e : { id: e.id, at: e.at, word: e.word });
 
   // ---------- the lock moment: a word to say, a sound, an animation ----------
   const WORDS = ["Otter","Lantern","Pickle","Comet","Walrus","Cactus","Banjo","Waffle","Rocket","Pumpkin",
@@ -360,12 +381,14 @@ body {
 
   async function logLock(photo) {
     armed = false;
-    const e = { at: Date.now(), word: pickWord() };
+    const at = Date.now();
+    const e = { id: at.toString(36) + "-" + Math.random().toString(36).slice(2, 6), at, word: pickWord() };
     if (photo) e.photo = photo;
     entries = trim([e, ...entries]);
     render();
     celebrate();
     await save();
+    tellHub({ id: e.id, at: e.at, word: e.word, photo: !!photo });
   }
 
   $("undo").onclick = async () => {
@@ -375,9 +398,11 @@ body {
       return;
     }
     armed = false;
+    const gone = entries[0];
     entries = entries.slice(1);
     render();
     await save();
+    if (gone && gone.id) tellHub({ remove: gone.id });
   };
 
   // ---------- photo: shrink before storing ----------
@@ -415,16 +440,101 @@ body {
     v.append(i); v.onclick = () => v.remove(); document.body.append(v);
   };
 
+  // ---------- paul-hub: the lock's time (never the photo), and the next reminder ----------
+  // paul-hub reminds Paul to lock up before an appointment in Day, unless a lock came in during the
+  // last hour. The code is the to-do's: from a link ending ?c=<code>, from the to-do or Morning on
+  // this site, or typed under the history. Without one, nothing leaves the phone. Locks wait in a
+  // small queue while offline and go when the phone is back online or the app opens again.
+  const HUB = "https://paul-hub.paul-o-a04.workers.dev";
+  const CODE_RE = /^[a-z0-9]{16}$/;
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
+  };
+  function takeCode() {
+    const params = new URLSearchParams(location.search);
+    const fromLink = (params.get("c") || "").trim().toLowerCase();
+    if (params.has("c")) {
+      params.delete("c");
+      const rest = params.toString();
+      history.replaceState(history.state, "", location.pathname + (rest ? "?" + rest : "") + location.hash);
+    }
+    if (CODE_RE.test(fromLink)) { store.set("door.code", fromLink); return fromLink; }
+    const own = store.get("door.code");
+    if (CODE_RE.test(own || "")) return own;
+    for (const k of ["todo.code", "morning.code"]) {   // the to-do and Morning keep it as JSON
+      const raw = store.get(k);
+      let c = raw;
+      try { c = JSON.parse(raw); } catch {}
+      if (CODE_RE.test(c || "")) { store.set("door.code", c); return c; }
+    }
+    return "";
+  }
+  const queue = () => { try { return JSON.parse(store.get("door.queue")) || []; } catch { return []; } };
+  const setQueue = q => store.set("door.queue", q.length ? JSON.stringify(q.slice(-40)) : null);
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  function tellHub(item) {
+    let q = queue();
+    // A lock removed before it went out never needs to go.
+    if (item.remove && q.some(x => x.id === item.remove)) q = q.filter(x => x.id !== item.remove);
+    else q.push(item);
+    setQueue(q);
+    flush();
+  }
+  async function flush() {
+    if (!code || codeBad || flushing || !navigator.onLine) return;
+    flushing = true;
+    try {
+      let sent = false;
+      for (let q = queue(); q.length; q = queue()) {
+        const item = q[0];
+        const body = item.remove ? { id: item.remove } : item;
+        let res;
+        try {
+          res = await fetch(HUB + "/api/door/" + code + (item.remove ? "/remove" : "/lock"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        } catch { break; }                                     // offline: the next open or "online" tries again
+        if (res.status === 404) { codeBad = true; break; }    // a wrong code: keep the queue for the right one
+        if (res.status >= 500 || res.status === 429) break;
+        setQueue(queue().filter(x => !same(x, item)));        // stored, or refused for good (400)
+        sent = true;
+      }
+      if (sent) refreshNext();
+    } finally { flushing = false; render(); }
+  }
+  async function refreshNext() {
+    if (!code || codeBad || !navigator.onLine) return;
+    try {
+      const res = await fetch(HUB + "/api/door/" + code, { cache: "no-store" });
+      if (res.status === 404) { codeBad = true; render(); return; }
+      if (!res.ok) return;
+      const j = await res.json();
+      next = j && j.next && Date.parse(j.next.start) && Date.parse(j.next.remindAt) && typeof j.next.title === "string" ? j.next : null;
+      store.set("door.next", next ? JSON.stringify(next) : null);
+      render();
+    } catch {}
+  }
+  $("connect").onclick = () => {
+    const c = (prompt("Your paul-hub code (the to-do's: 16 letters and digits)", "") || "").trim().toLowerCase();
+    if (!c) return;
+    if (!CODE_RE.test(c)) { alert("That is not the code: it has 16 letters and digits."); return; }
+    code = c; codeBad = false; store.set("door.code", c);
+    render(); flush(); refreshNext();
+  };
+
   // ---------- start ----------
+  code = takeCode();
+  try { next = JSON.parse(store.get("door.next")); } catch { next = null; }
   render();
   load().then(list => { entries = trim(list.slice().sort((a, b) => b.at - a.at)); render(); }).catch(() => {});
   setInterval(render, 30000);
   // A Home Screen app resumes without reloading, so check for a newer version whenever it comes back.
-  const VERSION = 5;
+  const VERSION = 6;
   const checkUpdate = () => fetch("version.json?t=" + Date.now(), { cache: "no-store" })
     .then(r => r.json()).then(j => { if (j.v > VERSION) location.reload(); }).catch(() => {});
   checkUpdate();
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) { render(); checkUpdate(); } });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { render(); checkUpdate(); flush(); refreshNext(); } });
+  addEventListener("online", () => { flush(); refreshNext(); });
+  flush(); refreshNext();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 })();
